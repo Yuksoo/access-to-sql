@@ -10,89 +10,104 @@ const escS = (str) => {
   }
 };
 
-const tablesNames = ['users', 'testdb']
-const writeData = false // false pour tester si les tables sont correctement récupérées ( à mettre sur true pour écrire sur le mysql distant )
+
+let tablesNames = []
+const writeData = true // false pour tester si les tables sont correctement récupérées ( à mettre sur true pour écrire sur le mysql distant )
+const startTime = Date.now()
 
 const getAccessTablesData = async () => {
-  const connection = await odbc.connect('DRIVER={Microsoft Access Driver (*.mdb, *.accdb)};DBQ=C:\\Users\\killi\\Documents\\testodbc.accdb;').catch((err) => {
+  const connection = await odbc.connect('DRIVER={Microsoft Access Driver (*.mdb, *.accdb)};DBQ=C:\\Users\\killi\\Documents\\DCLI.mdb;').catch((err) => {
     console.error(err)
-    return console.error(`[ODBC] Erreur de connexion.`)
-  })
+    return console.error(`[ODBC] Erreur de connexion.`);
+  });
 
+  try {
+    [tablesNames] = await db.execute(`SELECT * FROM odbcImport`)
+  } catch (error) {
+    console.error(err);
+    return console.error('[MYSQL] Erreur lors de la récupération de la liste des tables à importer.')
+  }
 
-  const tables = []
-  for (tbIndex in tablesNames) {
+  const tables = [];
+  for (const table of tablesNames) {
     try {
-      const tablesContents = await connection.query(`SELECT * FROM ${tablesNames[tbIndex]}`)
-      console.log(`[ODBC] Table récupérée : ${tablesNames[tbIndex]}.`)
-      tables.push({ data: tablesContents.slice(0, tablesContents.length), columns: tablesContents.columns, tableName: tablesNames[tbIndex] })
+
+      const query = `SELECT * FROM ${table.name}` //.replace(/{dateImport}/g, `#${formattedDate}#`);
+      console.log(query)
+      const tablesContents = await connection.query(query).catch((err) => {
+        console.log(err)
+      });
+      console.log(`[ODBC] Table récupérée : ${table.name}.`);
+      if(!tablesContents) return console.log(`[ODBC] ${table.name} : Aucune donnée à importer.`);
+
+      tables.push({
+        data: tablesContents.slice(0, tablesContents.length),
+        columns: tablesContents.columns,
+        tableName: table.newName 
+      });
     } catch (err) {
-      console.error(err)
-      return console.error(`[ODBC] Erreur de récupération de la table ${tablesNames[tbIndex]}.`)
+      console.error(err);
+      return console.error(`[ODBC] Erreur de récupération de la table ${table.name}.`);
     }
   }
   await connection.close();
 
-  return tables
-}
+  return tables;
+};
 
 const checkTable = async (tableName, columns) => {
-
   const columnDefinitions = columns.map(column => {
     const mysqlType = dataTypeMapping[column.dataTypeName] || 'VARCHAR';
     const columnSize = mysqlType === 'VARCHAR' && column.columnSize ? `(${column.columnSize})` : '';
     const nullable = column.nullable ? 'NULL' : 'NOT NULL';
-    return `\`${column.name}\` ${mysqlType}${columnSize} ${nullable}`;
+    return `\`${column.name.replace(/ /g, '_').replace(/@/g, '')}\` ${mysqlType}${columnSize} ${nullable}`;
   }).join(', ');
 
   const checkQuery = `SHOW TABLES LIKE '${tableName}'`;
   const createTableQuery = `
-        CREATE TABLE ${tableName} (
-            ${columnDefinitions}
-        )
-    `;
+    CREATE TABLE ${tableName} (
+      ${columnDefinitions.replace('DUREE', 'DUREE2').replace('DATE_CONTRAT', 'DATE_CONTRAT2')}
+    )
+  `;
 
   const [queryExists] = await db.execute(checkQuery).catch((err) => {
-    console.error(err)
-    return console.error(`[MYSQL] Erreur de vérification des lignes distantes.`)
-  })
+    console.error(err);
+    return console.error(`[MYSQL] Erreur de vérification des lignes distantes.`);
+  });
+
   if (queryExists.length === 0) {
     try {
-      await db.execute(createTableQuery)
+      await db.execute(createTableQuery);
     } catch (err) {
-      console.error(err)
-      return console.error(`[MYSQL] Erreur de création de la table ${tableName}.`)
+      console.error(err);
+      return console.error(`[MYSQL] Erreur de création de la table ${tableName}.`);
     }
     return false;
   } else {
     return true;
   }
-
-
-}
+};
 
 const pushIntoTable = async (data, columns) => {
-  const { tableName } = data
-  const totalData = data.data.length
-  let erreurs = 0
-  let succes = 0
-
+  const { tableName } = data;
+  const totalData = data.data.length;
+  let erreurs = 0;
+  let succes = 0;
 
   await db.execute(`DELETE from ${tableName} WHERE 1=1`).catch((err) => {
-    console.error(err)
-    return console.error(`[MYSQL] Erreur de suppression des lignes de la table ${tableName}.`)
-  })
-  console.log(`[] ------------------------------------------------------- ( ${tableName} ) ${totalData} lignes supprimées. -----------------------------------------------------`)
-
+    console.error(err);
+    return console.error(`[MYSQL] Erreur de suppression des lignes de la table ${tableName}.`);
+  });
+  console.log(`[] ------------------------------------------------------- ( ${tableName} ) ${totalData} lignes supprimées. -----------------------------------------------------`);
 
   const columnNames = columns.map(column => {
-    return `${column.name}`
+    return `\`${column.name.replace(/ /g, '_').replace(/@/g, '')}\``;
   }).join(', ');
 
   const formateValues = (localData) => {
     return columns.map(column => {
       const value = localData[column.name];
-      const mysqlType = dataTypeMapping[column.dataTypeName] || 'VARCHAR'
+      const mysqlType = dataTypeMapping[column.dataTypeName] || 'VARCHAR';
       if (value === null || value === undefined) return 'NULL'; // gérer NULL
 
       switch (mysqlType) {
@@ -110,33 +125,30 @@ const pushIntoTable = async (data, columns) => {
           return escS(String(value)); // Convertir en chaîne pour VARCHAR, TEXT, etc.
       }
     }).join(', ');
-  }
-
+  };
 
   for (const localDataIndex in data.data) {
-    const localData = data.data[localDataIndex]
+    const localData = data.data[localDataIndex];
     const percentage = ((Number(localDataIndex) + 1) / totalData) * 100;
 
     try {
-      const values = formateValues(localData)
-      await db.execute(`INSERT INTO ${tableName} (${columnNames}) VALUES (${values})`)
+      const values = formateValues(localData);
+      await db.execute(`INSERT INTO ${tableName} (${columnNames.replace('DUREE', 'DUREE2').replace('DATE_CONTRAT', 'DATE_CONTRAT2')}) VALUES (${values})`);
       succes++;
-      console.log(`[MYSQL] Ligne ${localDataIndex} insérée [ ${percentage.toFixed(2)}% ] ( ${tableName} )`)
+      console.log(`[MYSQL] Ligne ${localDataIndex} insérée [ ${percentage.toFixed(2)}% ] ( ${tableName} )`);
     } catch (err) {
       erreurs++;
-      console.log(`[MYSQL ERREUR] Ligne ${localDataIndex} insérée ( ${tableName} )`, err)
+      console.log(`[MYSQL ERREUR] Ligne ${localDataIndex} insérée ( ${tableName} )`, err);
     }
-
   }
 
+  console.log(`[] -----------------------------------------------------  ( ${tableName} ) ${erreurs} erreurs, ${succes} insérés. -----------------------------------------------------`);
+};
 
-
-  console.log(`[] -----------------------------------------------------  ( ${tableName} ) ${erreurs} erreurs, ${succes} insérés. -----------------------------------------------------`)
-}
 
 const execute = async () => {
   const tablesData = await getAccessTablesData() // Récupérer les tables mises dans le tableau tablesNames
-  //console.log(tablesData)
+   console.log(tablesData)
 
 
   if(!writeData) return;
@@ -155,8 +167,25 @@ const execute = async () => {
 
   }
 
-}
+  const formatDuration = (milliseconds) => {
+    const seconds = Math.floor(milliseconds / 1000) % 60;
+    const minutes = Math.floor(milliseconds / (1000 * 60)) % 60;
+    const hours = Math.floor(milliseconds / (1000 * 60 * 60)) % 24;
+    const days = Math.floor(milliseconds / (1000 * 60 * 60 * 24));
+  
+    return [
+      days ? `${days} jour${days > 1 ? 's' : ''}` : '',
+      hours ? `${hours} heure${hours > 1 ? 's' : ''}` : '',
+      minutes ? `${minutes} minute${minutes > 1 ? 's' : ''}` : '',
+      seconds ? `${seconds} seconde${seconds > 1 ? 's' : ''}` : ''
+    ].filter(Boolean).join(', ');
+  };
 
+  const timeTotal = Date.now() - startTime
+  console.log(`[] -----------------------------------------------------  Durée : ${formatDuration(timeTotal)} -----------------------------------------------------`)
+
+
+}
 
 execute()
 
