@@ -4,25 +4,25 @@ const cron = require('node-cron');
 const dataTypeMapping = require('./dataTypes')
 const escS = (str) => {
   if (str) {
-    return `'${str.replace(/'/g, "''")}'`;
+    return `'${str.replace(/\\/g, '\\\\').replace(/'/g, "''").replace(/"/g, '\\"')}'`;
   } else {
     return 'NULL';
   }
 };
-
+const moment = require('moment')
 
 let tablesNames = []
-const writeData = true // false pour tester si les tables sont correctement récupérées ( à mettre sur true pour écrire sur le mysql distant )
+const writeData = false // false pour tester si les tables sont correctement récupérées ( à mettre sur true pour écrire sur le mysql distant )
 const startTime = Date.now()
 
 const getAccessTablesData = async () => {
-  const connection = await odbc.connect('DRIVER={Microsoft Access Driver (*.mdb, *.accdb)};DBQ=C:\\Users\\killi\\Documents\\DCLI.mdb;').catch((err) => {
+  const connection = await odbc.connect('DRIVER={Microsoft Access Driver (*.mdb, *.accdb)};DBQ=C:\\Users\\killi\\Documents\\DataPackageIC.accdb;').catch((err) => {
     console.error(err)
     return console.error(`[ODBC] Erreur de connexion.`);
   });
 
   try {
-    [tablesNames] = await db.execute(`SELECT * FROM odbcImport`)
+    [tablesNames] = await db.execute(`SELECT * FROM odbcImport WHERE actif=1 AND client=0`)
   } catch (error) {
     console.error(err);
     return console.error('[MYSQL] Erreur lors de la récupération de la liste des tables à importer.')
@@ -32,7 +32,19 @@ const getAccessTablesData = async () => {
   for (const table of tablesNames) {
     try {
 
-      const query = `SELECT * FROM ${table.name}` //.replace(/{dateImport}/g, `#${formattedDate}#`);
+      let query = `SELECT * FROM ${table.name}` //.replace(/{dateImport}/g, `#${formattedDate}#`);
+      if (table.conditionSql && table.dateImport) {
+        // Formatage de la date d'importation au format Access (MM/DD/YYYY)
+        const formattedDateImport = moment.utc(table.dateImport).format('MM/DD/YYYY');
+      
+        // Conversion manuelle des dates DD/MM/YYYY présentes dans la conditionSql
+        const conditionSqlAdjusted = table.conditionSql.replace(/(\d{2})\/(\d{2})\/(\d{4})/g, (match, day, month, year) => {
+          return `#${month}/${day}/${year}#`; // Format pour Access
+        });
+      
+        // Remplacement de {dateImport} dans la condition
+        query += ` ${conditionSqlAdjusted}`.replace(/{dateImport}/g, `#${formattedDateImport}#`);
+      }
       console.log(query)
       const tablesContents = await connection.query(query).catch((err) => {
         console.log(err)
@@ -91,7 +103,7 @@ const checkTable = async (tableName, columns) => {
 const pushIntoTable = async (data, columns) => {
   const { tableName } = data;
   const totalData = data.data.length;
-  let erreurs = 0;
+  let erreurs = [];
   let succes = 0;
 
   await db.execute(`DELETE from ${tableName} WHERE 1=1`).catch((err) => {
@@ -137,18 +149,24 @@ const pushIntoTable = async (data, columns) => {
       succes++;
       console.log(`[MYSQL] Ligne ${localDataIndex} insérée [ ${percentage.toFixed(2)}% ] ( ${tableName} )`);
     } catch (err) {
-      erreurs++;
+      erreurs.push(err);
       console.log(`[MYSQL ERREUR] Ligne ${localDataIndex} insérée ( ${tableName} )`, err);
     }
   }
 
-  console.log(`[] -----------------------------------------------------  ( ${tableName} ) ${erreurs} erreurs, ${succes} insérés. -----------------------------------------------------`);
+
+  erreurs.forEach((errrr) => {
+    console.log(errrr)
+  })
+  console.log(`[] -----------------------------------------------------  ( ${tableName} ) ${erreurs.length} erreurs, ${succes} insérés. -----------------------------------------------------`);
+  
+
 };
 
 
 const execute = async () => {
   const tablesData = await getAccessTablesData() // Récupérer les tables mises dans le tableau tablesNames
-   console.log(tablesData)
+  console.log(tablesData)
 
 
   if(!writeData) return;
@@ -188,7 +206,3 @@ const execute = async () => {
 }
 
 execute()
-
-cron.schedule('0 0 * * *', () => {
-  execute()
-});
